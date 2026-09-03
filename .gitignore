@@ -1,0 +1,24 @@
+# 忽略所有文件
+*
+
+# 但保留 .py 文件
+!*.py
+
+# 也保留 .gitignore 文件本身
+!.gitignore
+
+# 忽略常见的 Python 缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 忽略虚拟环境
+venv/
+env/
+.venv/
+
+# 忽略 IDE 配置
+.vscode/
+.idea/
+*.iml
