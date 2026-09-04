@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QTextEdit,
@@ -86,7 +87,19 @@ LOG_MAX_BLOCKS = 3000
 PENDING_CAP = 6000
 
 # 标定合成分析报告版本号
-REPORT_VERSION = "V1.0.0.1"
+REPORT_VERSION = "V1.1.0.0"
+
+# 进度条经验行数估算: 每个步骤跑完约输出的行数
+# (受数据量影响, 后续可按真实运行微调; 汇总时按勾选步骤求和)
+STEP_LINE_ESTIMATE = {
+    STEP_WRITE_ANGLE: 12,
+    STEP_CALIBRATE: 60,
+    STEP_COMBINE: 800,
+    STEP_PRECISION: 300,
+    STEP_ERRORBAR: 200,
+    STEP_CROP: 60,
+    STEP_LAYER: 350,
+}
 
 # 测试结果判定:
 #   某位置"平均误差(位置精度)"或"标准差"任一超过该阈值, 该位置即判不通过;
@@ -109,6 +122,7 @@ class ScriptProcess(QThread):
     precision_ready = pyqtSignal(str)
     images_ready = pyqtSignal(list)
     step_changed = pyqtSignal(str)
+    progress = pyqtSignal(float)
     run_finished = pyqtSignal(bool)
 
     def __init__(self, cfg, parent=None):
@@ -118,6 +132,9 @@ class ScriptProcess(QThread):
         self._stop = False
         self._lock = threading.Lock()
         self._pending = []
+        # 预估总行数 = 勾选步骤对应经验行数之和; 空则为 0
+        self._total_lines = 0
+        self._line_count = 0
 
     def drain_text(self):
         with self._lock:
@@ -158,6 +175,11 @@ class ScriptProcess(QThread):
             json.dumps(self.cfg, ensure_ascii=False, indent=1),
             encoding="utf-8",
         )
+        self._total_lines = sum(
+            STEP_LINE_ESTIMATE.get(s, 100) for s in self.cfg.get("steps", [])
+        )
+        self._line_count = 0
+
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
@@ -181,6 +203,12 @@ class ScriptProcess(QThread):
                 if self._stop:
                     break
                 line = raw.rstrip("\r\n")
+                # 每输出一行都推进进度(含 MARK 标记行)
+                self._line_count += 1
+                if self._total_lines > 0:
+                    self.progress.emit(
+                        min(0.99, self._line_count / self._total_lines)
+                    )
                 if not line:
                     with self._lock:
                         self._pending.append("\n")
@@ -251,6 +279,7 @@ class MainWindow(QWidget):
         super().__init__()
         self.worker = None
         self._user_stopped = False
+        self._est_total = 0
         self.settings = QSettings(str(SCRIPT_DIR / "gui_config.ini"), QSettings.IniFormat)
         self._build_ui()
 
@@ -311,6 +340,18 @@ class MainWindow(QWidget):
         self.lbl_status.setWordWrap(True)
         self.lbl_status.setStyleSheet("color:#555;font-size:12px;")
 
+        # 进度条: 按 runner 输出行数估算当前进度
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setFixedHeight(28)
+        self._set_progress_style("normal")
+        self.lbl_progress_text = QLabel("")
+        self.lbl_progress_text.setAlignment(Qt.AlignCenter)
+        self.lbl_progress_text.setStyleSheet("font-size:11px;color:#666;")
+
         layout.addLayout(ver_row)
         layout.addStretch(2)
         layout.addWidget(self.btn_start)
@@ -318,6 +359,9 @@ class MainWindow(QWidget):
         layout.addWidget(self.btn_stop)
         layout.addStretch(1)
         layout.addWidget(self.lbl_status)
+        layout.addSpacing(6)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.lbl_progress_text)
         layout.addStretch(2)
         return panel
 
@@ -672,6 +716,13 @@ class MainWindow(QWidget):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.lbl_status.setText("启动中...")
+        self.progress_bar.setValue(0)
+        self._set_progress_style("normal")
+        self.lbl_progress_text.setText("")
+        self.progress_bar.setFormat("%p%")
+        self._est_total = sum(
+            STEP_LINE_ESTIMATE.get(s, 100) for s in enabled_steps
+        )
 
         syn_exe = self.edit_syn_exe.text().strip()
         ts_dir = self.edit_ts_dir.text().strip()
@@ -687,6 +738,7 @@ class MainWindow(QWidget):
         self.worker.precision_ready.connect(self.on_precision)
         self.worker.images_ready.connect(self.show_images)
         self.worker.step_changed.connect(self.lbl_status.setText)
+        self.worker.progress.connect(self.on_progress)
         self.worker.run_finished.connect(self.on_finished)
         self.log_timer.start()
         self.worker.start()
@@ -766,16 +818,55 @@ class MainWindow(QWidget):
         if path:
             ImageViewer(path, self).exec_()
 
+    def _set_progress_style(self, state):
+        """切换进度条颜色: normal=绿色, error=红色"""
+        if state == "error":
+            chunk = (
+                "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                "  stop:0 #c62828, stop:1 #ef5350);"
+            )
+            border = "1px solid #c62828;"
+        else:
+            chunk = (
+                "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                "  stop:0 #43a047, stop:1 #66bb6a);"
+            )
+            border = "1px solid #b0bec5;"
+        self.progress_bar.setStyleSheet(
+            "QProgressBar {"
+            "  border:" + border + " border-radius:6px;"
+            "  background:#e0e0e0; text-align:center; font-size:12px;"
+            "}"
+            "QProgressBar::chunk {"
+            + chunk +
+            "  border-radius:5px;"
+            "}"
+        )
+
+    def on_progress(self, fraction):
+        """按 runner 输出行数估算进度(0~1), 实时更新进度条百分比"""
+        pct = max(0, min(100, int(round(fraction * 100))))
+        self.progress_bar.setValue(pct)
+        # 当前步骤名显示在状态文字中, 进度条只显示百分比
+        if self.lbl_status.text() and not self.lbl_status.text().startswith("启动"):
+            self.lbl_progress_text.setText(self.lbl_status.text().strip())
+        else:
+            self.lbl_progress_text.setText("运行中...")
+
     def on_finished(self, ok):
         self.flush_log()
         self.log_timer.stop()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        self.progress_bar.setValue(100)
+        self.lbl_progress_text.setText("")
         if ok:
+            self._set_progress_style("normal")
             self.lbl_status.setText("完成")
         elif self._user_stopped:
             self.lbl_status.setText("已停止")
         else:
+            self._set_progress_style("error")
             self.lbl_status.setText("出错退出")
             QMessageBox.warning(
                 self, "运行结束", "脚本异常退出，请查看【运行内容】中的报错信息。"

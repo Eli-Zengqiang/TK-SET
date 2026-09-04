@@ -31,7 +31,7 @@ def cacl_error(datas_folders=None, fold=None):
 	PC_file=r'\AllGeoPoints.txt'
 	for fold in folds:
 		if fold == folds[0]:
-			continue
+			#continue
 			TS_files=TS_file1
 			###当输入datas_folders时，才需要执行以下if语句
 			if datas_folders:
@@ -51,7 +51,7 @@ def cacl_error(datas_folders=None, fold=None):
 
 
 		elif fold == folds[2]:
-			continue
+			#continue
 			TS_files = TS_file3
 			###当输入datas_folders时，才需要执行以下if语句
 			if datas_folders:
